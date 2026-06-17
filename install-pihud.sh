@@ -20,6 +20,7 @@ SVC_USER=huddisp
 GRP=pihud
 APP_DIR=/opt/pihud
 NEED_REBOOT=0
+INSTALL_SHELL_WRAPPER="${PIHUD_INSTALL_SHELL_WRAPPER:-0}"
 
 if [[ $EUID -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
 $SUDO -v 2>/dev/null || true
@@ -49,7 +50,7 @@ if ! id "$SVC_USER" >/dev/null 2>&1; then
 else
     $SUDO usermod -aG spi,i2c,gpio,"$GRP" "$SVC_USER"
 fi
-# let the human write the AI FIFO
+# Let the human write to the AI FIFO without granting SPI/I2C/GPIO access.
 if [[ "$REALUSER" != "root" ]]; then
     $SUDO gpasswd -a "$REALUSER" "$GRP" >/dev/null || warn "add $REALUSER to $GRP failed"
 fi
@@ -98,8 +99,8 @@ User=huddisp
 Group=huddisp
 SupplementaryGroups=spi i2c gpio pihud
 RuntimeDirectory=pihud
-RuntimeDirectoryMode=0751
-ExecStartPre=/bin/sh -c 'test -p /run/pihud/ai.fifo || { mkfifo -m 0660 /run/pihud/ai.fifo && chgrp pihud /run/pihud/ai.fifo; }'
+RuntimeDirectoryMode=0750
+ExecStartPre=/bin/sh -c 'chgrp pihud /run/pihud && chmod 0750 /run/pihud && rm -f /run/pihud/ai.fifo && mkfifo -m 0620 /run/pihud/ai.fifo && chgrp pihud /run/pihud/ai.fifo'
 WorkingDirectory=/opt/pihud
 ExecStart=/usr/bin/python3 /opt/pihud/pihud.py
 Restart=always
@@ -137,12 +138,13 @@ EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable pihud.service >/dev/null
 
-# ─── 6. Route `ollama run` through the HUD wrapper (per-user) ─────
-log "Wiring 'ollama run' to the HUD wrapper for $REALUSER…"
-if [[ -n "$REALHOME" && -d "$REALHOME" ]]; then
-    BRC="$REALHOME/.bashrc"
-    if ! grep -q "pihud ollama wrapper" "$BRC" 2>/dev/null; then
-        $SUDO tee -a "$BRC" >/dev/null <<'EOF'
+# ─── 6. Optionally route `ollama run` through the HUD wrapper (per-user) ─────
+if [[ "$INSTALL_SHELL_WRAPPER" == "1" ]]; then
+    log "Wiring 'ollama run' to the HUD wrapper for $REALUSER…"
+    if [[ -n "$REALHOME" && -d "$REALHOME" ]]; then
+        BRC="$REALHOME/.bashrc"
+        if ! grep -q "pihud ollama wrapper" "$BRC" 2>/dev/null; then
+            $SUDO tee -a "$BRC" >/dev/null <<'EOF'
 
 # >>> pihud ollama wrapper >>>
 ollama() {
@@ -151,8 +153,11 @@ ollama() {
 }
 # <<< pihud ollama wrapper <<<
 EOF
-        $SUDO chown "$REALUSER":"$REALUSER" "$BRC" 2>/dev/null || true
+            $SUDO chown "$REALUSER":"$REALUSER" "$BRC" 2>/dev/null || true
+        fi
     fi
+else
+    warn "Skipping shell wrapper. Set PIHUD_INSTALL_SHELL_WRAPPER=1 before running this installer to enable it."
 fi
 
 # ─── 7. Start ─────────────────────────────────────────────────────
@@ -168,6 +173,7 @@ log "Done."
 echo "  Smoke test : ./smoke-test-pihud.sh        (run with sudo for the panel stages)"
 echo "  Live logs  : journalctl -u pihud -f"
 echo "  Control    : sudo systemctl {status,restart,stop} pihud"
-echo "  AI to e-ink: open a NEW shell, then:  ollama run qwenfast 'capital of sweden'"
+echo "  AI to e-ink: ollama-hud-run qwenfast 'capital of sweden'"
+echo "  Optional wrapper: PIHUD_INSTALL_SHELL_WRAPPER=1 ./install-pihud.sh"
 [[ "$NEED_REBOOT" -eq 1 ]] && echo "  >>> sudo reboot first (buses enabled) <<<"
 echo "  Re-login (or 'newgrp pihud') so your shell picks up the '$GRP' group."
