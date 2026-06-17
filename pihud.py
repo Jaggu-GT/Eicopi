@@ -53,6 +53,11 @@ DEFAULTS = {
     # AI
     "ai_fifo": "/run/pihud/ai.fifo",
     "ai_answer_lines": 3,
+    "ai_max_line_bytes": 8192,
+    "ai_max_model_chars": 64,
+    "ai_max_question_chars": 512,
+    "ai_max_answer_chars": 2048,
+    "ai_min_refresh_sec": 2.0,
     # HAT keys (BCM); set enable_keys False if not wired on your bench setup
     "enable_keys": True,
     "key_scroll_up": 5,      # KEY1
@@ -420,6 +425,8 @@ class HUD:
         self._spi_lock = threading.Lock()
         self._last_minute = ""
         self._last_sig = None
+        self._last_ai_dirty = 0.0
+        self._ai_dirty_timer = None
         try:
             self._user = os.environ.get("SUDO_USER") or os.getlogin()
         except Exception:
@@ -558,35 +565,78 @@ class HUD:
             self._sleep(self.cfg["eink_min_refresh_sec"])
 
     # -- ai fifo --
+    def _truncate(self, value, max_chars):
+        text = "" if value is None else str(value)
+        return text[:max_chars]
+
+    def _validate_ai(self, line):
+        max_bytes = int(self.cfg["ai_max_line_bytes"])
+        if len(line.encode("utf-8", "replace")) > max_bytes:
+            raise ValueError("message too large")
+        rec = json.loads(line)
+        if not isinstance(rec, dict):
+            raise ValueError("message must be a JSON object")
+        status = rec.get("status")
+        if status not in ("thinking", "done"):
+            raise ValueError("unsupported status")
+        return {
+            "model": self._truncate(rec.get("model"), int(self.cfg["ai_max_model_chars"])),
+            "q": self._truncate(rec.get("q"), int(self.cfg["ai_max_question_chars"])),
+            "a": self._truncate(rec.get("a"), int(self.cfg["ai_max_answer_chars"])),
+            "status": status,
+        }
+
+    def _mark_ai_dirty(self):
+        now = time.monotonic()
+        wait = max(0.0, float(self.cfg["ai_min_refresh_sec"]) - (now - self._last_ai_dirty))
+        if wait <= 0.0:
+            self._last_ai_dirty = now
+            self._dirty.set()
+            return
+        if self._ai_dirty_timer and self._ai_dirty_timer.is_alive():
+            return
+
+        def delayed():
+            if not self._stop.wait(wait):
+                self._last_ai_dirty = time.monotonic()
+                self._dirty.set()
+
+        self._ai_dirty_timer = threading.Thread(target=delayed, daemon=True)
+        self._ai_dirty_timer.start()
+
     def _apply_ai(self, rec):
         with self._state_lock:
-            if rec.get("model"):
-                self.state["model"] = str(rec["model"])
-            status = rec.get("status")
-            if status == "thinking":
-                self.state.update(question=str(rec.get("q", "")), answer="",
-                                  status="thinking", scroll=0)
-            elif status == "done":
-                self.state.update(answer=str(rec.get("a", "")), status="done", scroll=0)
-                if rec.get("q"):
-                    self.state["question"] = str(rec["q"])
-        self._dirty.set()
+            if rec["model"]:
+                self.state["model"] = rec["model"]
+            if rec["status"] == "thinking":
+                self.state.update(question=rec["q"], answer="", status="thinking", scroll=0)
+            elif rec["status"] == "done":
+                self.state.update(answer=rec["a"], status="done", scroll=0)
+                if rec["q"]:
+                    self.state["question"] = rec["q"]
+        self._mark_ai_dirty()
 
     def _fifo_loop(self):
         path = self.cfg["ai_fifo"]
         while not self._stop.is_set():
             try:
-                with open(path, "r") as fifo:        # blocks until a writer opens
-                    for line in fifo:
+                with open(path, "r", encoding="utf-8", errors="replace") as fifo:        # blocks until a writer opens
+                    max_line = int(self.cfg["ai_max_line_bytes"]) + 1
+                    while not self._stop.is_set():
+                        line = fifo.readline(max_line + 1)
+                        if line == "":
+                            break
+                        if len(line) > max_line and not line.endswith("\n"):
+                            fifo.readline()          # discard the rest of this oversized record
+                            log("bad ai message: message too large")
+                            continue
                         line = line.strip()
                         if not line:
                             continue
                         try:
-                            self._apply_ai(json.loads(line))
+                            self._apply_ai(self._validate_ai(line))
                         except Exception as e:
                             log("bad ai message: %s" % e)
-                        if self._stop.is_set():
-                            break
             except FileNotFoundError:
                 self._sleep(1.0)
             except Exception as e:

@@ -10,7 +10,7 @@ The review used the OWASP Secure Coding Practices checklist as a baseline, espec
 
 ## Executive summary
 
-The repository has a good security baseline for an offline appliance: the HUD daemon runs as a dedicated system user, the systemd unit applies multiple hardening controls, and the app avoids shell interpolation for its subprocess calls. The main residual risks are operational and local-privilege risks caused by installer behavior, FIFO trust boundaries, GPIO/I2C/SPI hardware exposure, and unpinned dependencies pulled from package repositories during installation.
+The repository has a good security baseline for an offline appliance: the HUD daemon runs as a dedicated system user, the systemd unit applies multiple hardening controls, and the app avoids shell interpolation for its subprocess calls. The current implementation mitigates the original installer shell-wrapper, FIFO validation, e-ink AI refresh-rate, and Ollama binary-resolution findings. The main residual risks are operational and local-privilege risks caused by hardware-bus exposure and unpinned dependencies pulled from package repositories during installation.
 
 No license violation was found in the checked-in files. The MIT license is compatible with the Waveshare MIT-derived code, and the repository already includes a third-party notice for the Waveshare-derived e-paper implementation. Recommended attribution additions are listed below for AI-assisted generation and documentation provenance.
 
@@ -28,7 +28,7 @@ The installer appends a shell function to the detected user's `.bashrc` that ove
 
 **OWASP mapping:** system configuration, file management, least privilege, and secure defaults.
 
-**Recommendation:** Make shell wrapping opt-in with a clear prompt or environment variable such as `PIHUD_INSTALL_SHELL_WRAPPER=1`. Prefer documenting an explicit alias/function for the user to add manually, or install a separate command only. If kept, add a checksum/version marker and print the exact file and stanza changed.
+**Status:** Mitigated. Shell wrapping is now opt-in via `PIHUD_INSTALL_SHELL_WRAPPER=1`; the default install leaves `.bashrc` unchanged and directs users to call `ollama-hud-run` explicitly.
 
 ### H-2: AI FIFO accepts arbitrary local JSON from any member of `pihud`
 
@@ -38,7 +38,7 @@ The service creates `/run/pihud/ai.fifo` with group write permissions for `pihud
 
 **OWASP mapping:** input validation, data validation from untrusted sources, resource management, and output handling.
 
-**Recommendation:** Treat FIFO records as untrusted. Enforce maximum line size, maximum field lengths, allowed status values, UTF-8 normalization, and rate limits. Consider opening the FIFO with a small line reader that rejects records above a fixed size before `json.loads`. Consider replacing the shared group-writable FIFO with a per-user helper that performs validation before writing to a root/service-owned socket or FIFO.
+**Status:** Mitigated. The FIFO is now group-write-only instead of group-readable, the runtime directory is group-owned by `pihud` and not world-searchable, and the daemon validates JSON object shape, status values, total line size, per-field lengths, and AI repaint rate before updating the display.
 
 ### H-3: Installation performs live `apt-get update`/install without repository pinning or integrity policy
 
@@ -68,7 +68,7 @@ The service account receives `spi`, `i2c`, and `gpio` access, and the human user
 
 `_fifo_loop()` strips each FIFO line and passes it directly to `json.loads`; `_apply_ai()` converts fields to strings and stores them. This is simple and works, but it does not enforce maximum JSON line size, maximum prompt/answer/model lengths, known keys, or allowed value types. Very large local writes can increase memory use and rendering cost on a Pi 3B.
 
-**Recommendation:** Add a small validation function such as `validate_ai_record(rec)` with constants for maximum line bytes and per-field lengths. Drop or truncate overlong records and log a short rejection reason.
+**Status:** Mitigated. The daemon now validates FIFO messages before applying them and truncates accepted model, question, and answer fields to bounded lengths.
 
 ### M-2: E-ink refresh abuse can reduce display life and usability
 
@@ -76,7 +76,7 @@ The service account receives `spi`, `i2c`, and `gpio` access, and the human user
 
 The code has an `eink_min_refresh_sec` throttle and full-refresh interval, which is good. However, local FIFO spam and frequently changing system metrics can still trigger many partial updates. E-paper displays are not intended for high-frequency updates, and excessive updates can cause ghosting, poor readability, and avoidable wear.
 
-**Recommendation:** Add a stricter update coalescing policy for AI messages and system metrics, e.g. a minimum AI repaint interval, a bounded queue that keeps only the latest message, and a maximum partial refresh count before mandatory sleep/full refresh.
+**Status:** Mitigated for AI-triggered updates. The daemon now coalesces AI repaint requests behind `ai_min_refresh_sec` while keeping the most recent accepted AI state. System metrics still use the existing displayed-field change detection and e-ink minimum refresh delay.
 
 ### M-3: Subprocess usage is mostly safe, but environment/PATH still matters
 
@@ -84,7 +84,7 @@ The code has an `eink_min_refresh_sec` throttle and full-refresh interval, which
 
 The Python code correctly avoids `shell=True` for `iwgetid`, `nmcli`, and `ollama`. The service file's `ExecStartPre` uses `/bin/sh -c`, but with a constant command string rather than user input. Remaining risk is PATH/environment trust for the user-invoked `ollama-hud-run`, which launches `ollama` by name.
 
-**Recommendation:** In `ollama-hud-run.py`, optionally resolve `ollama` with `shutil.which()` and log the resolved path. For higher assurance, document an expected absolute path or configurable `PIHUD_OLLAMA_BIN`. Keep avoiding shell interpolation.
+**Status:** Mitigated. `ollama-hud-run.py` now resolves the Ollama binary once using `PIHUD_OLLAMA_BIN`, then `shutil.which("ollama")`, and still invokes it without shell interpolation.
 
 ### M-4: Error handling hides useful detail and can mask hardware faults
 
@@ -158,8 +158,8 @@ Because the project was AI-assisted and based on Waveshare official documentatio
 
 ## Suggested priority plan
 
-1. Add FIFO schema/length/rate validation and privacy controls for displayed AI content.
-2. Make the shell wrapper opt-in rather than silently modifying `.bashrc`.
-3. Add an offline deployment checklist and target-device hardening verification commands.
-4. Add automated syntax/shell checks for development.
-5. Add `ATTRIBUTION.md` for Waveshare documentation/reference code and Claude-assisted generation provenance.
+1. Add privacy controls for displayed AI content.
+2. Add an offline deployment checklist and target-device hardening verification commands.
+3. Add automated syntax/shell checks for development.
+4. Add `ATTRIBUTION.md` for Waveshare documentation/reference code and Claude-assisted generation provenance.
+5. Consider additional per-user mediation for FIFO writes if the device will have multiple interactive local users.
