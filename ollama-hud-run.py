@@ -17,11 +17,13 @@ runs ollama normally and skips the push (never blocks, never fails the command).
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 
 FIFO = os.environ.get("PIHUD_FIFO", "/run/pihud/ai.fifo")
+OLLAMA_BIN = os.environ.get("PIHUD_OLLAMA_BIN") or shutil.which("ollama") or "ollama"
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 DONE = re.compile(r"\.\.\.\s*done thinking\.?", re.IGNORECASE)
 
@@ -61,7 +63,7 @@ def main():
     fd = open_fifo()
     push(fd, {"model": model, "q": prompt, "status": "thinking"})
 
-    cmd = ["ollama", "run", model] + ([prompt] if prompt else [])
+    cmd = [OLLAMA_BIN, "run", model] + ([prompt] if prompt else [])
     captured = []
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
