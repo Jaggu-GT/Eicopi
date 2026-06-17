@@ -11,6 +11,7 @@ The review used the OWASP Secure Coding Practices checklist as a baseline, espec
 ## Executive summary
 
 The repository has a good security baseline for an offline appliance: the HUD daemon runs as a dedicated system user, the systemd unit applies multiple hardening controls, and the app avoids shell interpolation for its subprocess calls. The current implementation mitigates the original installer shell-wrapper, FIFO validation, e-ink AI refresh-rate, and Ollama binary-resolution findings. The main residual risks are operational and local-privilege risks caused by hardware-bus exposure and unpinned dependencies pulled from package repositories during installation.
+The repository has a good security baseline for an offline appliance: the HUD daemon runs as a dedicated system user, the systemd unit applies multiple hardening controls, and the app avoids shell interpolation for its subprocess calls. The main residual risks are operational and local-privilege risks caused by installer behavior, FIFO trust boundaries, GPIO/I2C/SPI hardware exposure, and unpinned dependencies pulled from package repositories during installation.
 
 No license violation was found in the checked-in files. The MIT license is compatible with the Waveshare MIT-derived code, and the repository already includes a third-party notice for the Waveshare-derived e-paper implementation. Recommended attribution additions are listed below for AI-assisted generation and documentation provenance.
 
@@ -28,7 +29,7 @@ The installer appends a shell function to the detected user's `.bashrc` that ove
 
 **OWASP mapping:** system configuration, file management, least privilege, and secure defaults.
 
-**Status:** Mitigated. Shell wrapping is now opt-in via `PIHUD_INSTALL_SHELL_WRAPPER=1`; the default install leaves `.bashrc` unchanged and directs users to call `ollama-hud-run` explicitly.
+**Recommendation:** Make shell wrapping opt-in with a clear prompt or environment variable such as `PIHUD_INSTALL_SHELL_WRAPPER=1`. Prefer documenting an explicit alias/function for the user to add manually, or install a separate command only. If kept, add a checksum/version marker and print the exact file and stanza changed.
 
 ### H-2: AI FIFO accepts arbitrary local JSON from any member of `pihud`
 
