@@ -25,21 +25,21 @@ def send(direction):
     """Validate the path is really a FIFO, then write one bounded record.
     Never blocks or raises if the daemon is not listening."""
     try:
-        if not stat.S_ISFIFO(os.stat(FIFO).st_mode):
-            print("refusing to write to non-FIFO path: %s" % FIFO, file=sys.stderr)
-            return False
-        fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
     except OSError as exc:
-        print("cannot open FIFO %s: %s" % (FIFO, exc), file=sys.stderr)
-        return False
+        print("cannot open FIFO %s: %s" % (path, exc), file=sys.stderr)
+        return None
     try:
-        rec = {"status": "scroll", "dir": direction}
-        os.write(fd, (json.dumps(rec, separators=(",", ":")) + "\n").encode("utf-8"))
-    except OSError:
-        return False
-    finally:
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
         os.close(fd)
-    return True
+        print("cannot stat FIFO %s: %s" % (path, exc), file=sys.stderr)
+        return None
+    if not stat.S_ISFIFO(mode):
+        os.close(fd)
+        print("refusing to write to non-FIFO path: %s" % path, file=sys.stderr)
+        return None
+    return fd
 
 
 def read_key():
