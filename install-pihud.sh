@@ -5,7 +5,7 @@
 #   chmod +x install-pihud.sh
 #   ./install-pihud.sh 2>&1 | tee install-pihud.log
 #
-# Files expected alongside this script: pihud.py  pi_displays.py  ollama-hud-run.py
+# Files expected alongside this script: pihud.py  pi_displays.py  ollama-hud-run.py  pihud-scroll.py
 
 set -euo pipefail
 export LC_ALL=C LANG=C
@@ -29,7 +29,7 @@ REALUSER="${SUDO_USER:-$USER}"
 [[ "$REALUSER" == "root" ]] && warn "Could not detect a non-root invoking user; FIFO group membership may need a manual gpasswd."
 REALHOME="$(getent passwd "$REALUSER" | cut -d: -f6 || true)"
 
-for f in pihud.py pi_displays.py ollama-hud-run.py; do
+for f in pihud.py pi_displays.py ollama-hud-run.py pihud-scroll.py; do
     [[ -f "$SRC/$f" ]] || fail "missing $f next to installer"
 done
 
@@ -75,6 +75,7 @@ $SUDO install -d -m 0755 "$APP_DIR"
 $SUDO install -m 0644 "$SRC/pihud.py" "$APP_DIR/pihud.py"
 $SUDO install -m 0644 "$SRC/pi_displays.py" "$APP_DIR/pi_displays.py"
 $SUDO install -m 0755 "$SRC/ollama-hud-run.py" /usr/local/bin/ollama-hud-run
+$SUDO install -m 0755 "$SRC/pihud-scroll.py" /usr/local/bin/pihud-scroll
 $SUDO install -d -m 0755 /etc/pihud
 if [[ ! -f /etc/pihud/pihud.toml ]]; then
     $SUDO tee /etc/pihud/pihud.toml >/dev/null <<'EOF'
@@ -174,6 +175,7 @@ echo "  Smoke test : ./smoke-test-pihud.sh        (run with sudo for the panel s
 echo "  Live logs  : journalctl -u pihud -f"
 echo "  Control    : sudo systemctl {status,restart,stop} pihud"
 echo "  AI to e-ink: ollama-hud-run qwenfast 'capital of sweden'"
+echo "  Scroll AI  : pihud-scroll up    # or: pihud-scroll down"
 echo "  Optional wrapper: PIHUD_INSTALL_SHELL_WRAPPER=1 ./install-pihud.sh"
 [[ "$NEED_REBOOT" -eq 1 ]] && echo "  >>> sudo reboot first (buses enabled) <<<"
 echo "  Re-login (or 'newgrp pihud') so your shell picks up the '$GRP' group."

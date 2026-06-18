@@ -95,7 +95,9 @@ FIFO=/run/pihud/ai.fifo
 if [[ -p "$FIFO" ]]; then
     if printf '%s\n' '{"model":"smoke-test","q":"smoke test question","status":"thinking"}' > "$FIFO" 2>/dev/null \
        && sleep 1 \
-       && printf '%s\n' '{"model":"smoke-test","q":"smoke test question","a":"smoke test answer — if you can read this on the e-ink, the FIFO path works end to end.","status":"done"}' > "$FIFO" 2>/dev/null; then
+       && printf '%s\n' '{"model":"smoke-test","q":"smoke test question","a":"smoke test answer - if you can read this on the e-ink, the FIFO path works end to end.","status":"done"}' > "$FIFO" 2>/dev/null \
+       && sleep 1 \
+       && printf '%s\n' '{"status":"scroll","dir":"down"}' > "$FIFO" 2>/dev/null; then
         ok "pushed Q/A to FIFO — check the e-ink AI frame"
     else
         no "could not write FIFO (are you in the 'pihud' group? try: newgrp pihud)"
