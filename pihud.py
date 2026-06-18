@@ -22,6 +22,7 @@ Tunables live in DEFAULTS and may be overridden by /etc/pihud/pihud.toml.
 import json
 import math
 import os
+import re
 import signal
 import threading
 import time
@@ -278,8 +279,17 @@ def fmt_light(nw):
 # --------------------------------------------------------------------------- #
 # Drawing helpers                                                             #
 # --------------------------------------------------------------------------- #
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def clean_text(s):
+    # Replace control characters (incl. stray ANSI/cursor leftovers, newlines,
+    # tabs) with spaces so untrusted strings can never corrupt a frame.
+    return _CTRL.sub(" ", s if isinstance(s, str) else str(s))
+
+
 def fit(draw, text, font, maxw):
-    text = "" if text is None else str(text)
+    text = "" if text is None else clean_text(text)
     if draw.textlength(text, font=font) <= maxw:
         return text
     while text and draw.textlength(text + "...", font=font) > maxw:
@@ -289,7 +299,7 @@ def fit(draw, text, font, maxw):
 
 def wrap(draw, text, font, maxw):
     out, line = [], ""
-    for word in str(text).split():
+    for word in clean_text(text).split():
         trial = (line + " " + word).strip()
         if draw.textlength(trial, font=font) <= maxw:
             line = trial
@@ -368,25 +378,35 @@ def render_eink(fonts, st):
     d.line([0, 30, W - 1, 30], fill=0)
 
     # ---- sensor --------------------------------------------------------
+    # Two columns either side of a vertical divider at x=132; each cell is
+    # auto-shrunk with fit() so long values clip instead of overrunning.
+    LX, LW, RX, RW = 3, 125, 138, 121
     d.text((3, 32), "Sensor Readings", font=fonts["head"], fill=0)
     temp = "--" if st["temp"] is None else "%.1f" % st["temp"]
     hum = "--" if st["hum"] is None else "%.0f" % st["hum"]
     press = "--" if st["press"] is None else "%.0f" % st["press"]
-    d.text((3, 44), "Temp %s \u00b0C    Hum %s %%" % (temp, hum), font=fonts["data"], fill=0)
-    d.text((3, 56), "Press %s hPa   Light %s nW  %s" % (press, fmt_light(st["light"]), st["phase"]),
+    d.text((LX, 44), fit(d, "Temperature %s \u00b0C" % temp, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 44), fit(d, "Humidity %s %%" % hum, fonts["data"], RW), font=fonts["data"], fill=0)
+    d.text((LX, 56), fit(d, "Pressure %s hPa" % press, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 56), fit(d, "Light %s  %s" % (fmt_light(st["light"]), st["phase"]), fonts["data"], RW),
            font=fonts["data"], fill=0)
+    d.line([132, 43, 132, 70], fill=0)
     d.line([0, 72, W - 1, 72], fill=0)
 
     # ---- system --------------------------------------------------------
     d.text((3, 74), "System", font=fonts["head"], fill=0)
+    nav = "GPU/VRAM n/a"
+    d.text((W - 3 - d.textlength(nav, font=fonts["head"]), 75), nav, font=fonts["head"], fill=0)
     cpu = "--" if st["cpu"] is None else "%.0f" % st["cpu"]
     ram = "--" if st["ram"] is None else "%.0f" % st["ram"]
     soc = "--" if st["soc"] is None else "%.1f" % st["soc"]
-    d.text((3, 86), "CPU %s%%   RAM %s%%   SoC %s \u00b0C" % (cpu, ram, soc), font=fonts["data"], fill=0)
     top = st["top_name"] or "--"
     topm = "" if not st["top_rss"] else " %dM" % (st["top_rss"] // (1024 * 1024))
-    d.text((3, 98), fit(d, "GPU --  VRAM --  TOP %s%s" % (top, topm), fonts["data"], W - 6),
-           font=fonts["data"], fill=0)
+    d.text((LX, 86), fit(d, "CPU %s%%" % cpu, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 86), fit(d, "RAM %s%%" % ram, fonts["data"], RW), font=fonts["data"], fill=0)
+    d.text((LX, 98), fit(d, "SoC %s \u00b0C" % soc, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 98), fit(d, "TOP %s%s" % (top, topm), fonts["data"], RW), font=fonts["data"], fill=0)
+    d.line([132, 85, 132, 112], fill=0)
     d.line([0, 114, W - 1, 114], fill=0)
 
     # ---- ai ------------------------------------------------------------
@@ -577,6 +597,11 @@ class HUD:
         if not isinstance(rec, dict):
             raise ValueError("message must be a JSON object")
         status = rec.get("status")
+        if status == "scroll":
+            direction = rec.get("dir")
+            if direction not in ("up", "down"):
+                raise ValueError("bad scroll dir")
+            return {"status": "scroll", "dir": direction}
         if status not in ("thinking", "done"):
             raise ValueError("unsupported status")
         return {
@@ -605,6 +630,9 @@ class HUD:
         self._ai_dirty_timer.start()
 
     def _apply_ai(self, rec):
+        if rec["status"] == "scroll":
+            self._scroll(-1 if rec["dir"] == "up" else 1)   # immediate repaint
+            return
         with self._state_lock:
             if rec["model"]:
                 self.state["model"] = rec["model"]
