@@ -33,16 +33,16 @@ for f in pihud.py pi_displays.py ollama-hud-run.py pihud-scroll.py; do
     [[ -f "$SRC/$f" ]] || fail "missing $f next to installer"
 done
 
-# ─── 1. Packages (apt, no pip) ───────────────────────────────────
-log "Installing packages…"
+# --- 1. Packages (apt, no pip) -----------------------------------
+log "Installing packages..."
 $SUDO apt-get update -y
 $SUDO apt-get install -y --no-install-recommends \
     python3 python3-pil python3-psutil python3-spidev \
     python3-gpiozero python3-lgpio python3-smbus \
     fonts-dejavu-core i2c-tools wireless-tools
 
-# ─── 2. Service identity (least privilege) ───────────────────────
-log "Creating group/user…"
+# --- 2. Service identity (least privilege) -----------------------
+log "Creating group/user..."
 getent group "$GRP" >/dev/null || $SUDO groupadd --system "$GRP"
 if ! id "$SVC_USER" >/dev/null 2>&1; then
     $SUDO useradd --system --no-create-home --home-dir /nonexistent \
@@ -55,8 +55,8 @@ if [[ "$REALUSER" != "root" ]]; then
     $SUDO gpasswd -a "$REALUSER" "$GRP" >/dev/null || warn "add $REALUSER to $GRP failed"
 fi
 
-# ─── 3. Enable SPI + I2C (config.txt) ────────────────────────────
-log "Ensuring SPI + I2C buses are enabled…"
+# --- 3. Enable SPI + I2C (config.txt) ----------------------------
+log "Ensuring SPI + I2C buses are enabled..."
 CONFIG=""
 for p in /boot/firmware/config.txt /boot/config.txt; do
     [[ -f "$p" ]] && { CONFIG="$p"; break; }
@@ -69,8 +69,8 @@ add_param() {
 add_param "dtparam=spi=on"
 add_param "dtparam=i2c_arm=on"
 
-# ─── 4. Install application ───────────────────────────────────────
-log "Installing application to $APP_DIR…"
+# --- 4. Install application ---------------------------------------
+log "Installing application to $APP_DIR..."
 $SUDO install -d -m 0755 "$APP_DIR"
 $SUDO install -m 0644 "$SRC/pihud.py" "$APP_DIR/pihud.py"
 $SUDO install -m 0644 "$SRC/pi_displays.py" "$APP_DIR/pi_displays.py"
@@ -87,8 +87,8 @@ if [[ ! -f /etc/pihud/pihud.toml ]]; then
 EOF
 fi
 
-# ─── 5. systemd unit (hardened, least privilege) ─────────────────
-log "Installing systemd unit…"
+# --- 5. systemd unit (hardened, least privilege) -----------------
+log "Installing systemd unit..."
 $SUDO tee /etc/systemd/system/pihud.service >/dev/null <<'EOF'
 [Unit]
 Description=Pi dual-display HUD (OLED + 2.7" e-ink)
@@ -97,12 +97,12 @@ After=multi-user.target
 [Service]
 Type=simple
 User=huddisp
-Group=huddisp
-SupplementaryGroups=spi i2c gpio pihud
+Group=pihud
+SupplementaryGroups=spi i2c gpio
 RuntimeDirectory=pihud
 RuntimeDirectoryMode=0750
 ExecStartPre=/bin/sh -c 'chgrp pihud /run/pihud && chmod 0750 /run/pihud && rm -f /run/pihud/ai.fifo && mkfifo -m 0620 /run/pihud/ai.fifo && chgrp pihud /run/pihud/ai.fifo'
-WorkingDirectory=/opt/pihud
+WorkingDirectory=/run/pihud
 ExecStart=/usr/bin/python3 /opt/pihud/pihud.py
 Restart=always
 RestartSec=3
@@ -139,9 +139,9 @@ EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable pihud.service >/dev/null
 
-# ─── 6. Optionally route `ollama run` through the HUD wrapper (per-user) ─────
+# --- 6. Optionally route `ollama run` through the HUD wrapper (per-user) -----
 if [[ "$INSTALL_SHELL_WRAPPER" == "1" ]]; then
-    log "Wiring 'ollama run' to the HUD wrapper for $REALUSER…"
+    log "Wiring 'ollama run' to the HUD wrapper for $REALUSER..."
     if [[ -n "$REALHOME" && -d "$REALHOME" ]]; then
         BRC="$REALHOME/.bashrc"
         if ! grep -q "pihud ollama wrapper" "$BRC" 2>/dev/null; then
@@ -161,15 +161,15 @@ else
     warn "Skipping shell wrapper. Set PIHUD_INSTALL_SHELL_WRAPPER=1 before running this installer to enable it."
 fi
 
-# ─── 7. Start ─────────────────────────────────────────────────────
+# --- 7. Start -----------------------------------------------------
 if [[ "$NEED_REBOOT" -eq 1 ]]; then
-    warn "SPI/I2C were just enabled — reboot before the service can use them."
+    warn "SPI/I2C were just enabled - reboot before the service can use them."
 else
-    log "Starting service…"
+    log "Starting service..."
     $SUDO systemctl restart pihud.service || warn "start failed; check: journalctl -u pihud -e"
 fi
 
-# ─── Done ─────────────────────────────────────────────────────────
+# --- Done ---------------------------------------------------------
 log "Done."
 echo "  Smoke test : ./smoke-test-pihud.sh        (run with sudo for the panel stages)"
 echo "  Live logs  : journalctl -u pihud -f"

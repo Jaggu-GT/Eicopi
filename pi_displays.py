@@ -136,7 +136,7 @@ class EPD2in7V2:
         self.rst.off(); time.sleep(0.002)
         self.rst.on(); time.sleep(0.2)
 
-    def _wait(self, timeout=30):
+    def wait_idle(self, timeout=30):
         t0 = time.time()
         while self.busy.value == 1:          # 1 == busy on this controller
             time.sleep(0.02)
@@ -145,9 +145,9 @@ class EPD2in7V2:
 
     def init(self):
         self.reset()
-        self._wait()
+        self.wait_idle()
         self._cmd(0x12)                       # SWRESET
-        self._wait()
+        self.wait_idle()
         self._cmd(0x45)                       # RAM-Y start/end -> 0..263
         for d in (0x00, 0x00, 0x07, 0x01):
             self._data1(d)
@@ -178,36 +178,48 @@ class EPD2in7V2:
             raise ValueError("image must be 264x176 or 176x264, got %dx%d" % (w, h))
         return buf
 
-    def _turn_on(self, mode):
-        self._cmd(0x22); self._data1(mode); self._cmd(0x20); self._wait()
+    def _trigger(self, mode):
+        # Start a refresh and return immediately; the caller waits via wait_idle().
+        self._cmd(0x22); self._data1(mode); self._cmd(0x20)
 
     def clear(self):
         n = self.WIDTH // 8 * self.HEIGHT
         self._cmd(0x24); self._data([0xFF] * n)
         self._cmd(0x26); self._data([0xFF] * n)
-        self._turn_on(0xF7)
+        self._trigger(0xF7); self.wait_idle()
         self._based = True
 
-    def display_base(self, buf):
-        """Full (flashing) refresh that also writes the partial-mode baseline."""
+    def send_base(self, buf):
+        """Full (flashing) refresh + partial baseline: SPI transfer and trigger only,
+        no BUSY wait. The caller waits via wait_idle() with the SPI lock released."""
         self._cmd(0x24); self._data(buf)
         self._cmd(0x26); self._data(buf)
-        self._turn_on(0xF7)
+        self._trigger(0xF7)
         self._based = True
 
-    def display_quick(self, buf):
-        """No-flash full-frame update using the partial waveform."""
+    def send_quick(self, buf):
+        """No-flash full-frame update: SPI transfer and trigger only, no BUSY wait."""
         if not self._based:
-            self.display_base(buf)
+            self.send_base(buf)
             return
         self._cmd(0x24); self._data(buf)
-        self._turn_on(0xFF)
+        self._trigger(0xFF)
+
+    def display_base(self, buf):
+        self.send_base(buf); self.wait_idle()
+
+    def display_quick(self, buf):
+        self.send_quick(buf); self.wait_idle()
 
     def sleep(self):
         self._cmd(0x10); self._data1(0x01)
         time.sleep(0.1)
 
     def close(self):
+        try:
+            self.clear()        # blank the panel so it does not retain host/SSID/AI text
+        except Exception:
+            pass
         try:
             self.sleep()
         except Exception:
