@@ -16,18 +16,21 @@ def usage():
 
 def open_fifo(path):
     try:
-        mode = os.stat(path).st_mode
-    except OSError as exc:
-        print("cannot stat FIFO %s: %s" % (path, exc), file=sys.stderr)
-        return None
-    if not stat.S_ISFIFO(mode):
-        print("refusing to write to non-FIFO path: %s" % path, file=sys.stderr)
-        return None
-    try:
-        return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
     except OSError as exc:
         print("cannot open FIFO %s: %s" % (path, exc), file=sys.stderr)
         return None
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
+        os.close(fd)
+        print("cannot stat FIFO %s: %s" % (path, exc), file=sys.stderr)
+        return None
+    if not stat.S_ISFIFO(mode):
+        os.close(fd)
+        print("refusing to write to non-FIFO path: %s" % path, file=sys.stderr)
+        return None
+    return fd
 
 
 def main(argv):
