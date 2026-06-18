@@ -22,9 +22,11 @@ Tunables live in DEFAULTS and may be overridden by /etc/pihud/pihud.toml.
 import json
 import math
 import os
+import re
 import signal
 import threading
 import time
+import unicodedata
 
 import psutil
 from PIL import Image, ImageDraw, ImageFont
@@ -50,10 +52,12 @@ DEFAULTS = {
     "poll_sec": 2.0,
     "eink_min_refresh_sec": 1.5,
     "eink_full_refresh_sec": 600,
+    "eink_busy_timeout_sec": 30,
     # AI
     "ai_fifo": "/run/pihud/ai.fifo",
     "ai_answer_lines": 3,
     "ai_max_line_bytes": 8192,
+    "ai_max_drop_bytes": 1048576,
     "ai_max_model_chars": 64,
     "ai_max_question_chars": 512,
     "ai_max_answer_chars": 2048,
@@ -279,9 +283,24 @@ def fmt_light(nw):
 # --------------------------------------------------------------------------- #
 # Drawing helpers                                                             #
 # --------------------------------------------------------------------------- #
+# Matches CSI (incl. cursor codes like ESC[?25l / ESC[?25h), OSC, and other
+# single-char escape sequences. Used to scrub anything that slips past the
+# sender so it can never render as garbage on the panel (defense in depth).
+_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+
+
 def clean_text(value):
     text = "" if value is None else str(value)
-    return "".join(ch if ch >= " " and ch != "\x7f" else " " for ch in text)
+    text = _ANSI.sub("", text)
+    out = []
+    for ch in text:
+        if ch == "\t":
+            out.append(" ")
+        elif ch < " " or ch == "\x7f" or unicodedata.category(ch) == "Cf":
+            out.append(" ")          # C0 controls, DEL, zero-width / bidi format chars
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def fit(draw, text, font, maxw):
@@ -373,26 +392,34 @@ def render_eink(fonts, st):
     d.text(((W - dw) / 2, 15), dt, font=fonts["dt"], fill=0)
     d.line([0, 30, W - 1, 30], fill=0)
 
-    # ---- sensor --------------------------------------------------------
+    # ---- sensor (2-column grid, divider at x=132, auto-shrink via fit) --
+    LX, LW, RX, RW = 3, 125, 138, 121
     d.text((3, 32), "Sensor Readings", font=fonts["head"], fill=0)
     temp = "--" if st["temp"] is None else "%.1f" % st["temp"]
     hum = "--" if st["hum"] is None else "%.0f" % st["hum"]
     press = "--" if st["press"] is None else "%.0f" % st["press"]
-    d.text((3, 44), "Temp %s \u00b0C    Hum %s %%" % (temp, hum), font=fonts["data"], fill=0)
-    d.text((3, 56), "Press %s hPa   Light %s nW  %s" % (press, fmt_light(st["light"]), st["phase"]),
+    d.text((LX, 44), fit(d, "Temperature %s \u00b0C" % temp, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 44), fit(d, "Humidity %s %%" % hum, fonts["data"], RW), font=fonts["data"], fill=0)
+    d.text((LX, 56), fit(d, "Pressure %s hPa" % press, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 56), fit(d, "Light %s  %s" % (fmt_light(st["light"]), st["phase"]), fonts["data"], RW),
            font=fonts["data"], fill=0)
+    d.line([132, 43, 132, 70], fill=0)
     d.line([0, 72, W - 1, 72], fill=0)
 
-    # ---- system --------------------------------------------------------
+    # ---- system (2-column grid; GPU/VRAM not exposed on VC4) ------------
     d.text((3, 74), "System", font=fonts["head"], fill=0)
+    nav = "GPU/VRAM n/a"
+    d.text((W - 3 - d.textlength(nav, font=fonts["head"]), 75), nav, font=fonts["head"], fill=0)
     cpu = "--" if st["cpu"] is None else "%.0f" % st["cpu"]
     ram = "--" if st["ram"] is None else "%.0f" % st["ram"]
     soc = "--" if st["soc"] is None else "%.1f" % st["soc"]
-    d.text((3, 86), "CPU %s%%   RAM %s%%   SoC %s \u00b0C" % (cpu, ram, soc), font=fonts["data"], fill=0)
     top = st["top_name"] or "--"
     topm = "" if not st["top_rss"] else " %dM" % (st["top_rss"] // (1024 * 1024))
-    d.text((3, 98), fit(d, "GPU --  VRAM --  TOP %s%s" % (top, topm), fonts["data"], W - 6),
-           font=fonts["data"], fill=0)
+    d.text((LX, 86), fit(d, "CPU %s%%" % cpu, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 86), fit(d, "RAM %s%%" % ram, fonts["data"], RW), font=fonts["data"], fill=0)
+    d.text((LX, 98), fit(d, "SoC %s \u00b0C" % soc, fonts["data"], LW), font=fonts["data"], fill=0)
+    d.text((RX, 98), fit(d, "TOP %s%s" % (top, topm), fonts["data"], RW), font=fonts["data"], fill=0)
+    d.line([132, 85, 132, 112], fill=0)
     d.line([0, 114, W - 1, 114], fill=0)
 
     # ---- ai ------------------------------------------------------------
@@ -541,11 +568,15 @@ class HUD:
         st = self._snapshot()
         img = render_eink(self.fonts, st)
         buf = self.epd.getbuffer(img)
-        with self._spi_lock:
+        with self._spi_lock:                 # hold the bus only for the byte transfer + trigger
             if full:
-                self.epd.display_base(buf)
+                self.epd.send_base(buf)
             else:
-                self.epd.display_quick(buf)
+                self.epd.send_quick(buf)
+        # BUSY is a GPIO poll with no SPI traffic, so wait with the lock released:
+        # the OLED clock keeps updating during the multi-second e-ink refresh, and a
+        # stuck panel can no longer freeze it (bounded by eink_busy_timeout_sec anyway).
+        self.epd.wait_idle(self.cfg["eink_busy_timeout_sec"])
 
     def _eink_loop(self):
         try:
@@ -641,7 +672,16 @@ class HUD:
                         if line == "":
                             break
                         if len(line) > max_line and not line.endswith("\n"):
-                            fifo.readline()          # discard the rest of this oversized record
+                            # Drop the rest of this oversized record in bounded chunks.
+                            # Never an unbounded readline -> a newline-less flood from a
+                            # pihud-group writer cannot exhaust memory.
+                            drop_cap = int(self.cfg["ai_max_drop_bytes"])
+                            dropped = 0
+                            while dropped < drop_cap:
+                                chunk = fifo.readline(4096)
+                                if chunk == "" or chunk.endswith("\n"):
+                                    break
+                                dropped += len(chunk)
                             log("bad ai message: message too large")
                             continue
                         line = line.strip()

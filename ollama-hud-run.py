@@ -24,7 +24,10 @@ import time
 
 FIFO = os.environ.get("PIHUD_FIFO", "/run/pihud/ai.fifo")
 OLLAMA_BIN = os.environ.get("PIHUD_OLLAMA_BIN") or shutil.which("ollama") or "ollama"
-ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Strip CSI (incl. cursor show/hide like ESC[?25l / ESC[?25h), OSC, and other
+# single-char escapes that ollama's spinner emits; then scrub leftover controls.
+ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 DONE = re.compile(r"\.\.\.\s*done thinking\.?", re.IGNORECASE)
 
 
@@ -50,7 +53,25 @@ def extract_answer(raw):
     if matches:
         text = text[matches[-1].end():]
     text = re.sub(r"^\s*Thinking\.\.\.\s*", "", text, flags=re.IGNORECASE)
+    text = CTRL.sub(" ", text)
     return " ".join(text.split())
+
+
+def resolve_model(name):
+    """Map an alias (e.g. qwenfast) to its base tag (e.g. qwen3:0.6b) via
+    `ollama show --modelfile`. Falls back to the given name on anything odd."""
+    try:
+        out = subprocess.run([OLLAMA_BIN, "show", name, "--modelfile"],
+                             capture_output=True, text=True, timeout=5)
+        for raw in out.stdout.splitlines():
+            s = raw.strip()
+            if s.upper().startswith("FROM "):
+                ref = s[5:].strip()
+                if ref and "/" not in ref and "\\" not in ref:   # a tag, not a blob path
+                    return ref
+    except Exception:
+        pass
+    return name
 
 
 def main():
@@ -59,9 +80,10 @@ def main():
         return 2
     model = sys.argv[1]
     prompt = " ".join(sys.argv[2:])
+    display_model = resolve_model(model)
 
     fd = open_fifo()
-    push(fd, {"model": model, "q": prompt, "status": "thinking"})
+    push(fd, {"model": display_model, "q": prompt, "status": "thinking"})
 
     cmd = [OLLAMA_BIN, "run", model] + ([prompt] if prompt else [])
     captured = []
@@ -70,7 +92,7 @@ def main():
                                 text=True, bufsize=1)
     except FileNotFoundError:
         print("ollama not found in PATH", file=sys.stderr)
-        push(fd, {"model": model, "q": prompt, "a": "[ollama not found]", "status": "done"})
+        push(fd, {"model": display_model, "q": prompt, "a": "[ollama not found]", "status": "done"})
         if fd is not None:
             os.close(fd)
         return 127
@@ -85,7 +107,7 @@ def main():
         proc.terminate()
 
     answer = extract_answer("".join(captured)) or "[no answer]"
-    push(fd, {"model": model, "q": prompt, "a": answer, "status": "done"})
+    push(fd, {"model": display_model, "q": prompt, "a": answer, "status": "done"})
     if fd is not None:
         time.sleep(0.05)
         os.close(fd)
