@@ -58,6 +58,7 @@ DEFAULTS = {
     "ai_max_question_chars": 512,
     "ai_max_answer_chars": 2048,
     "ai_min_refresh_sec": 2.0,
+    "scroll_min_refresh_sec": 0.5,
     # HAT keys (BCM); set enable_keys False if not wired on your bench setup
     "enable_keys": True,
     "key_scroll_up": 5,      # KEY1
@@ -278,8 +279,13 @@ def fmt_light(nw):
 # --------------------------------------------------------------------------- #
 # Drawing helpers                                                             #
 # --------------------------------------------------------------------------- #
+def clean_text(value):
+    text = "" if value is None else str(value)
+    return "".join(ch if ch >= " " and ch != "\x7f" else " " for ch in text)
+
+
 def fit(draw, text, font, maxw):
-    text = "" if text is None else str(text)
+    text = clean_text(text)
     if draw.textlength(text, font=font) <= maxw:
         return text
     while text and draw.textlength(text + "...", font=font) > maxw:
@@ -289,7 +295,7 @@ def fit(draw, text, font, maxw):
 
 def wrap(draw, text, font, maxw):
     out, line = [], ""
-    for word in str(text).split():
+    for word in clean_text(text).split():
         trial = (line + " " + word).strip()
         if draw.textlength(trial, font=font) <= maxw:
             line = trial
@@ -577,8 +583,13 @@ class HUD:
         if not isinstance(rec, dict):
             raise ValueError("message must be a JSON object")
         status = rec.get("status")
-        if status not in ("thinking", "done"):
+        if status not in ("thinking", "done", "scroll"):
             raise ValueError("unsupported status")
+        if status == "scroll":
+            direction = rec.get("dir")
+            if direction not in ("up", "down"):
+                raise ValueError("unsupported scroll direction")
+            return {"status": status, "dir": direction}
         return {
             "model": self._truncate(rec.get("model"), int(self.cfg["ai_max_model_chars"])),
             "q": self._truncate(rec.get("q"), int(self.cfg["ai_max_question_chars"])),
@@ -605,6 +616,9 @@ class HUD:
         self._ai_dirty_timer.start()
 
     def _apply_ai(self, rec):
+        if rec["status"] == "scroll":
+            self._scroll(-1 if rec["dir"] == "up" else 1)
+            return
         with self._state_lock:
             if rec["model"]:
                 self.state["model"] = rec["model"]
@@ -647,7 +661,13 @@ class HUD:
     def _scroll(self, delta):
         with self._state_lock:
             self.state["scroll"] = max(0, self.state["scroll"] + delta)
-        self._dirty.set()
+        self._mark_scroll_dirty()
+
+    def _mark_scroll_dirty(self):
+        now = time.monotonic()
+        if now - getattr(self, "_last_scroll_dirty", 0.0) >= float(self.cfg["scroll_min_refresh_sec"]):
+            self._last_scroll_dirty = now
+            self._dirty.set()
 
     def _force_refresh(self):
         self._force_full = True
